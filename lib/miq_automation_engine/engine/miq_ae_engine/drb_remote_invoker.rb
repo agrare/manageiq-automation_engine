@@ -191,7 +191,7 @@ rescue Exception => err
     $evm.log('error', "  \#{err.class}: \#{err.message}")
     $evm.log('error', "  \#{err.backtrace[0..-2].join('\n')}")
   end
-  raise
+  exit 1
 ensure
   $evm.disconnect_sql
 end
