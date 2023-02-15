@@ -69,24 +69,50 @@ module MiqAeEngine
 
   def self.deliver(*args)
     options     = options_from_args(args)
-
-    # HACK: If we are launching a specific Automate instance representing a workflow, then we run that instead
-    if options[:namespace] == "System" && options[:class_name] == "Workflow"
-      workflow_id = options[:instance_name].split("-").last.to_i
-      workflow = Workflow.find(workflow_id)
-
-      task_id = workflow.execute(inputs: options)
-      MiqTask.wait_for_taskid(task_id)
-
-      workflow_instance_id = MiqTask.find(task_id).context_data[:workflow_instance_id]
-      return WorkflowInstance.find(workflow_instance_id)
-    end
-
-    user_obj    = ae_user_object(options)
     state       = options[:state]
     vmdb_object = nil
     ae_result   = 'error'
     miq_task    = MiqTask.find(options[:open_url_task_id]) if options[:open_url_task_id]
+
+    # HACK: If we are launching a specific Automate instance representing a workflow, then we run that instead
+    if options[:namespace] == "System" && options[:class_name] == "Workflow"
+      begin
+        miq_task&.state_active
+        object_name = "#{options[:object_type]}.#{options[:object_id]}"
+        _log.info("Delivering #{ManageIQ::Password.sanitize_string(options[:attrs].inspect)} for object [#{object_name}] with state [#{state}] to Automate")
+
+        if options[:object_type]
+          vmdb_object = options[:object_type].constantize.find_by!(:id => options[:object_id])
+          vmdb_object.before_ae_starts(options) if vmdb_object.respond_to?(:before_ae_starts)
+        end
+
+        workflow_id = options[:instance_name].split("-").last.to_i
+        workflow = Workflow.find(workflow_id)
+
+        task_id = workflow.execute(inputs: options)
+        MiqTask.wait_for_taskid(task_id)
+
+        workflow_instance_id = MiqTask.find(task_id).context_data[:workflow_instance_id]
+        workflow_instance    = WorkflowInstance.find(workflow_instance_id)
+
+        ae_result = workflow_instance.status == "success" ? "ok" : "error"
+
+        return workflow_instance
+      rescue => err
+        message = "Error delivering #{ManageIQ::Password.sanitize_string(options[:attrs].inspect)} for object [#{object_name}] with state [#{state}] to Automate: #{err.message}"
+        miq_task&.error(MiqTask::MESSAGE_TASK_COMPLETED_UNSUCCESSFULLY)
+        _log.error(message)
+        return nil
+      ensure
+        vmdb_object.after_ae_delivery(ae_result.to_s.downcase) if vmdb_object.respond_to?(:after_ae_delivery)
+        if miq_task && miq_task.state == MiqTask::STATE_ACTIVE
+          miq_task.update_message(MiqTask::MESSAGE_TASK_COMPLETED_SUCCESSFULLY) if miq_task.message == MiqTask::DEFAULT_MESSAGE
+          miq_task.state_finished
+        end
+      end
+    end
+
+    user_obj    = ae_user_object(options)
 
     begin
       miq_task&.state_active
